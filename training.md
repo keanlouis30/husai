@@ -77,36 +77,370 @@ drive.mount('/content/drive')
 
 ---
 
-### Step 3 — Load and Merge Datasets
+# HUSAI — Model 1: At-Risk Detection
+# Step 3: Load, Clean, and Merge Your Datasets
+# -----------------------------------------------
+# Run each cell in order in Google Colab.
+# Upload your CSV files to Colab first (see Cell 0).
 
-```python
+# ─────────────────────────────────────────────
+# CELL 0 — Upload your files to Colab
+# ─────────────────────────────────────────────
+from google.colab import files
+from google.colab import drive
+
+# Mount Drive so you can save progress
+drive.mount('/content/drive')
+
+# Upload all CSVs at once — a file picker will appear
+uploaded = files.upload()
+
+# After uploading, confirm what was received
+import os
+print("Files uploaded:")
+for f in uploaded:
+    print(f"  {f}")
+
+
+# ─────────────────────────────────────────────
+# CELL 1 — Install dependencies
+# ─────────────────────────────────────────────
+!pip install lightgbm optuna shap imbalanced-learn scikit-learn pandas numpy matplotlib seaborn --quiet
+
+
+# ─────────────────────────────────────────────
+# CELL 2 — Load Dataset A: at-risk-detection.csv
+# (UCI Dropout dataset — your primary source)
+# ─────────────────────────────────────────────
 import pandas as pd
 import numpy as np
 
-# Load UCI dropout dataset (primary)
-df_uci = pd.read_csv('dataset_uci.csv', delimiter=';')
+# NOTE: This file uses semicolons as delimiters
+df_uci = pd.read_csv('at-risk-detection.csv', delimiter=';')
 
-# Standardize target column to binary: 1 = at-risk (Dropout), 0 = not at-risk
+print("=== UCI Dataset ===")
+print(f"Shape: {df_uci.shape}")
+print(f"Columns: {list(df_uci.columns)}")
+print(f"\nTarget value counts:\n{df_uci['Target'].value_counts()}")
+print(f"\nFirst row preview:\n{df_uci.head(1).T}")
+
+
+# ─────────────────────────────────────────────
+# CELL 3 — Process Dataset A
+# Map Target → binary at_risk label
+# ─────────────────────────────────────────────
+
+# Target has 3 values: 'Dropout', 'Graduate', 'Enrolled'
+# For Husai: Dropout = at risk (1), everything else = not at risk (0)
 df_uci['at_risk'] = (df_uci['Target'] == 'Dropout').astype(int)
 
-# Select features relevant to Husai's inputs
-features = [
-    'Curricular units 1st sem (grade)',
-    'Curricular units 2nd sem (grade)',
-    'Curricular units 1st sem (approved)',
-    'Curricular units 2nd sem (approved)',
-    'Curricular units 1st sem (evaluations)',
+# Fix column name with tab/whitespace issue
+df_uci.columns = df_uci.columns.str.strip()
+
+# Select the features most relevant to Husai's school data inputs
+uci_features = [
     'Age at enrollment',
+    'Gender',
     'Scholarship holder',
     'Tuition fees up to date',
     'Displaced',
-    'Gender'
+    'Debtor',
+    'Curricular units 1st sem (enrolled)',
+    'Curricular units 1st sem (approved)',
+    'Curricular units 1st sem (grade)',
+    'Curricular units 1st sem (evaluations)',
+    'Curricular units 2nd sem (enrolled)',
+    'Curricular units 2nd sem (approved)',
+    'Curricular units 2nd sem (grade)',
+    'Curricular units 2nd sem (evaluations)',
+    'at_risk'
 ]
 
-df = df_uci[features + ['at_risk']].dropna()
-print(f"Dataset shape: {df.shape}")
-print(f"Class distribution:\n{df['at_risk'].value_counts()}")
-```
+df_uci_clean = df_uci[uci_features].copy()
+
+# Rename to generic names for merging
+df_uci_clean = df_uci_clean.rename(columns={
+    'Age at enrollment': 'age',
+    'Gender': 'gender',
+    'Scholarship holder': 'scholarship',
+    'Tuition fees up to date': 'fees_up_to_date',
+    'Displaced': 'displaced',
+    'Debtor': 'debtor',
+    'Curricular units 1st sem (enrolled)': 'units_enrolled_s1',
+    'Curricular units 1st sem (approved)': 'units_approved_s1',
+    'Curricular units 1st sem (grade)': 'avg_grade_s1',
+    'Curricular units 1st sem (evaluations)': 'evaluations_s1',
+    'Curricular units 2nd sem (enrolled)': 'units_enrolled_s2',
+    'Curricular units 2nd sem (approved)': 'units_approved_s2',
+    'Curricular units 2nd sem (grade)': 'avg_grade_s2',
+    'Curricular units 2nd sem (evaluations)': 'evaluations_s2',
+})
+
+# Derived feature: approval rate (how many enrolled units did the student pass?)
+df_uci_clean['approval_rate_s1'] = (
+    df_uci_clean['units_approved_s1'] / df_uci_clean['units_enrolled_s1'].replace(0, np.nan)
+).fillna(0)
+df_uci_clean['approval_rate_s2'] = (
+    df_uci_clean['units_approved_s2'] / df_uci_clean['units_enrolled_s2'].replace(0, np.nan)
+).fillna(0)
+
+# Tag source for traceability
+df_uci_clean['source'] = 'uci'
+
+print(f"\n=== Processed UCI Dataset ===")
+print(f"Shape: {df_uci_clean.shape}")
+print(f"At-risk distribution:\n{df_uci_clean['at_risk'].value_counts()}")
+
+
+# ─────────────────────────────────────────────
+# CELL 4 — Load Dataset B: merged_dataset.csv
+# (Behavioral + engagement signals)
+# ─────────────────────────────────────────────
+df_behav = pd.read_csv('merged_dataset.csv', delimiter='\t')
+
+print("=== Behavioral Dataset ===")
+print(f"Shape: {df_behav.shape}")
+print(f"FinalGrade distribution:\n{df_behav['FinalGrade'].value_counts()}")
+print(f"\nFirst row preview:\n{df_behav.head(1).T}")
+
+
+# ─────────────────────────────────────────────
+# CELL 5 — Process Dataset B
+# FinalGrade → binary at_risk label
+# ─────────────────────────────────────────────
+
+# Check what values FinalGrade has
+print("Unique FinalGrade values:", df_behav['FinalGrade'].unique())
+
+# If FinalGrade is a letter grade (A/B/C/D/F):
+# at_risk = 1 if grade is D or F
+if df_behav['FinalGrade'].dtype == object:
+    df_behav['at_risk'] = df_behav['FinalGrade'].isin(['D', 'F']).astype(int)
+# If FinalGrade is numeric (0-100):
+else:
+    df_behav['at_risk'] = (df_behav['FinalGrade'] < 60).astype(int)
+
+# Encode categorical columns
+df_behav['gender_enc'] = (df_behav['Gender'].str.lower() == 'male').astype(int)
+
+# Map LearningStyle to numeric
+learning_style_map = {'visual': 0, 'auditory': 1, 'kinesthetic': 2, 'reading': 3}
+df_behav['learning_style_enc'] = df_behav['LearningStyle'].str.lower().map(learning_style_map).fillna(0)
+
+# Select features
+behav_features = [
+    'StudyHours', 'Attendance', 'Motivation', 'AssignmentCompletion',
+    'ExamScore', 'StressLevel', 'Discussions', 'OnlineCourses',
+    'gender_enc', 'learning_style_enc', 'at_risk'
+]
+
+df_behav_clean = df_behav[behav_features].copy()
+
+# Rename to match common schema
+df_behav_clean = df_behav_clean.rename(columns={
+    'StudyHours': 'study_hours',
+    'Attendance': 'attendance_rate',
+    'Motivation': 'motivation_score',
+    'AssignmentCompletion': 'assignment_completion',
+    'ExamScore': 'avg_grade_s1',           # Treat exam score as proxy for semester grade
+    'StressLevel': 'stress_level',
+    'Discussions': 'class_participation',
+    'OnlineCourses': 'extra_resources',
+    'gender_enc': 'gender',
+    'learning_style_enc': 'learning_style',
+})
+
+df_behav_clean['source'] = 'behavioral'
+
+print(f"\n=== Processed Behavioral Dataset ===")
+print(f"Shape: {df_behav_clean.shape}")
+print(f"At-risk distribution:\n{df_behav_clean['at_risk'].value_counts()}")
+
+
+# ─────────────────────────────────────────────
+# CELL 6 — Load & Aggregate Dataset C
+# (behavioral-engagement-signals — 5 separate files)
+# These have Student_ID as the join key
+# ─────────────────────────────────────────────
+
+df_students    = pd.read_csv('students.csv', delimiter='\t')
+df_attendance  = pd.read_csv('attendance.csv', delimiter='\t')
+df_homework    = pd.read_csv('homework.csv', delimiter='\t')
+df_performance = pd.read_csv('performance.csv', delimiter='\t')
+
+print("=== Raw file shapes ===")
+print(f"students:    {df_students.shape}")
+print(f"attendance:  {df_attendance.shape}")
+print(f"homework:    {df_homework.shape}")
+print(f"performance: {df_performance.shape}")
+
+
+# ─────────────────────────────────────────────
+# CELL 7 — Aggregate the 5-file dataset
+# Roll everything up to one row per Student_ID
+# ─────────────────────────────────────────────
+
+# --- Attendance: calculate attendance rate per student ---
+df_att_agg = df_attendance.groupby('Student_ID').apply(
+    lambda x: (x['Attendance_Status'].str.lower() == 'present').sum() / len(x)
+).reset_index()
+df_att_agg.columns = ['Student_ID', 'attendance_rate']
+
+# --- Homework: calculate completion rate and average grade ---
+df_hw_agg = df_homework.groupby('Student_ID').agg(
+    assignment_completion=('Status', lambda x: (x.str.lower() == 'submitted').mean()),
+    avg_hw_grade=('Grade_Feedback', lambda x: pd.to_numeric(x, errors='coerce').mean())
+).reset_index()
+
+# --- Performance: average exam score and homework completion across subjects ---
+df_perf_agg = df_performance.groupby('Student_ID').agg(
+    avg_grade_s1=('Exam_Score', 'mean'),
+    hw_completion_pct=('Homework_Completion_%', 'mean')
+).reset_index()
+
+# --- Merge all aggregated tables on Student_ID ---
+df_engagement = df_students[['Student_ID', 'Grade_Level']].copy()
+df_engagement = df_engagement.merge(df_att_agg, on='Student_ID', how='left')
+df_engagement = df_engagement.merge(df_hw_agg, on='Student_ID', how='left')
+df_engagement = df_engagement.merge(df_perf_agg, on='Student_ID', how='left')
+
+# Fill missing values with column medians
+df_engagement = df_engagement.fillna(df_engagement.median(numeric_only=True))
+
+# Create at_risk label: at risk if avg exam score < 60 OR attendance < 80%
+df_engagement['at_risk'] = (
+    (df_engagement['avg_grade_s1'] < 60) |
+    (df_engagement['attendance_rate'] < 0.8)
+).astype(int)
+
+# Select features
+df_engagement_clean = df_engagement[[
+    'attendance_rate', 'assignment_completion',
+    'avg_hw_grade', 'avg_grade_s1', 'hw_completion_pct', 'at_risk'
+]].copy()
+
+df_engagement_clean['source'] = 'engagement'
+
+print(f"\n=== Aggregated Engagement Dataset ===")
+print(f"Shape: {df_engagement_clean.shape}")
+print(f"At-risk distribution:\n{df_engagement_clean['at_risk'].value_counts()}")
+
+
+# ─────────────────────────────────────────────
+# CELL 8 — Load Dataset D: xAPI-Edu-Data.csv
+# (Behavioral engagement signals — xAPI)
+# ─────────────────────────────────────────────
+
+df_xapi = pd.read_csv('xAPI-Edu-Data.csv')
+
+print("=== xAPI Dataset ===")
+print(f"Shape: {df_xapi.shape}")
+print(f"Class (target) distribution:\n{df_xapi['Class'].value_counts()}")
+
+
+# ─────────────────────────────────────────────
+# CELL 9 — Process Dataset D
+# Class: L (Low) = at risk, M/H = not at risk
+# ─────────────────────────────────────────────
+
+df_xapi['at_risk'] = (df_xapi['Class'] == 'L').astype(int)
+df_xapi['gender_enc'] = (df_xapi['gender'] == 'M').astype(int)
+df_xapi['absent_enc'] = (df_xapi['StudentAbsenceDays'] == 'Above-7').astype(int)
+df_xapi['parent_engaged'] = (df_xapi['ParentAnsweringSurvey'] == 'Yes').astype(int)
+
+df_xapi_clean = df_xapi[[
+    'raisedhands', 'VisITedResources', 'AnnouncementsView',
+    'Discussion', 'absent_enc', 'parent_engaged',
+    'gender_enc', 'at_risk'
+]].rename(columns={
+    'raisedhands': 'class_participation',
+    'VisITedResources': 'resources_accessed',
+    'AnnouncementsView': 'announcements_viewed',
+    'Discussion': 'discussion_posts',
+    'absent_enc': 'high_absence',
+    'parent_engaged': 'parent_engagement',
+    'gender_enc': 'gender',
+})
+
+df_xapi_clean['source'] = 'xapi'
+
+print(f"\n=== Processed xAPI Dataset ===")
+print(f"Shape: {df_xapi_clean.shape}")
+print(f"At-risk distribution:\n{df_xapi_clean['at_risk'].value_counts()}")
+
+
+# ─────────────────────────────────────────────
+# CELL 10 — Merge All 4 Datasets
+# Use outer merge on shared columns, fill gaps with NaN
+# ─────────────────────────────────────────────
+
+# All datasets have 'at_risk' and 'source' — merge on shared feature columns
+# Features common across most datasets:
+SHARED_FEATURES = [
+    'avg_grade_s1',       # Exam / semester grade
+    'attendance_rate',    # Attendance percentage
+    'assignment_completion',  # Homework / assignment completion
+    'class_participation',    # Engagement in class
+    'gender',             # Gender (encoded as 0/1)
+    'at_risk',
+    'source'
+]
+
+# Align each dataset to shared features (missing columns become NaN)
+def align_df(df, features):
+    for col in features:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df[features]
+
+df_combined = pd.concat([
+    align_df(df_uci_clean.copy(), SHARED_FEATURES),
+    align_df(df_behav_clean.copy(), SHARED_FEATURES),
+    align_df(df_engagement_clean.copy(), SHARED_FEATURES),
+    align_df(df_xapi_clean.copy(), SHARED_FEATURES),
+], ignore_index=True)
+
+print(f"\n=== COMBINED DATASET ===")
+print(f"Total records: {df_combined.shape[0]}")
+print(f"Features: {df_combined.shape[1]}")
+print(f"\nSource breakdown:\n{df_combined['source'].value_counts()}")
+print(f"\nAt-risk distribution:\n{df_combined['at_risk'].value_counts()}")
+print(f"\nMissing values per column:\n{df_combined.isnull().sum()}")
+
+
+# ─────────────────────────────────────────────
+# CELL 11 — Handle Missing Values
+# ─────────────────────────────────────────────
+
+# For numeric columns: fill with column median
+numeric_cols = df_combined.select_dtypes(include=[np.number]).columns.tolist()
+numeric_cols = [c for c in numeric_cols if c != 'at_risk']
+
+df_combined[numeric_cols] = df_combined[numeric_cols].fillna(
+    df_combined[numeric_cols].median()
+)
+
+# Drop source column before training
+df_final = df_combined.drop(columns=['source'])
+
+print(f"\n=== FINAL DATASET (ready for training) ===")
+print(f"Shape: {df_final.shape}")
+print(f"Missing values: {df_final.isnull().sum().sum()} (should be 0)")
+print(f"\nAt-risk class balance:")
+print(df_final['at_risk'].value_counts())
+print(f"\nClass ratio: {df_final['at_risk'].mean():.2%} at-risk")
+
+
+# ─────────────────────────────────────────────
+# CELL 12 — Save merged dataset to Drive
+# ─────────────────────────────────────────────
+
+import os
+os.makedirs('/content/drive/MyDrive/husai', exist_ok=True)
+
+df_final.to_csv('/content/drive/MyDrive/husai/husai_merged_dataset.csv', index=False)
+print("Saved to Google Drive: husai_merged_dataset.csv")
+print("\nStep 3 complete. Proceed to Step 4 (SMOTE + Model Training).")
 
 ---
 
