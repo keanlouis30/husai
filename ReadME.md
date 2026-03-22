@@ -1,6 +1,6 @@
 # HUSAI
 ### AI-Powered School Intelligence Platform
-*High-Level Concept Document v1.0*
+*High-Level Concept Document v2.0*
 *Prepared for the Google.org × Claude.ai Build for Good Competition*
 
 ---
@@ -13,12 +13,14 @@ A single public school teacher in the Philippines manages an average of 100+ stu
 
 Husai addresses both sides of this crisis simultaneously through four interconnected views:
 
-- **Student View** — individual learning profiles with longitudinal progress tracking
-- **Teacher View** — class-wide intelligence, at-risk flags, and auto-generated records
+- **Student View** — individual learning profiles with longitudinal progress tracking and AI-generated personal insights
+- **Teacher View** — class-wide intelligence, at-risk flags, auto-generated records, and Mahusai Insights
 - **Admin View** — school-wide performance dashboard and early warning signals
 - **DepEd View** *(future roadmap)* — national heatmap, solving the data black hole at scale
 
-The Philippines is the beachhead. The problem is universal.
+Beyond the school, Husai's long-term vision is to become **national education infrastructure** — a living dataset that powers urban planning, resource allocation, policy research, and societal prediction models at a scale never before possible in the Philippines.
+
+The Philippines is the beachhead. The problem — and the opportunity — is universal.
 
 ---
 
@@ -50,6 +52,38 @@ Husai is an AI administrative layer that sits quietly behind the scenes. Teacher
 
 **Core design principle:** zero new behavior required from teachers. If a teacher grades a quiz, that is a data point. If a teacher takes attendance, that is a data point. Husai aggregates all of it passively.
 
+### 3.1 The JSON-First Data Architecture
+
+Every piece of student and class data in Husai is normalized into a **single structured JSON snapshot** per student per quarter, and per class per quarter. This is the single source of truth that all downstream features consume — AI insights, UI rendering, SF9/SF10 generation, admin dashboards, and future DepEd exports all read from the same object.
+
+```
+DB → JSON Snapshot → (1) Mahusai Insights (Claude API)
+                     (2) Student & Teacher UI rendering
+                     (3) SF9 / SF10 auto-generation (Llama 3)
+                     (4) Admin & school dashboards
+                     (5) At-risk model inference (LightGBM)
+                     (6) Future: DepEd national data pipeline
+                     (7) Future: Urban planning & policy models
+```
+
+This architecture means adding a new feature never requires rebuilding the data layer — it just reads the JSON. The same snapshot that feeds a teacher's dashboard can feed a national planning model without duplication or reformatting.
+
+**Student snapshot schema (abbreviated):**
+```json
+{
+  "meta": { "student_id", "quarter", "school_year", "generated_at" },
+  "profile": { "name", "grade", "section", "school", "adviser" },
+  "grades": { "Math": { "q1", "q2", "q3", "trend" }, "..." },
+  "gwa": { "q1", "q2", "q3" },
+  "attendance": { "present", "absences", "rate", "status" },
+  "flags": { "at_risk", "risk_score", "risk_factors" },
+  "achievements": [ { "label", "subject", "quarter" } ],
+  "insights": null
+}
+```
+
+`insights` starts as `null` and is populated after the Claude API call, then written back into the snapshot. Everything else is generated directly from the database.
+
 ---
 
 ## 4. Product Views
@@ -60,17 +94,18 @@ Husai is an AI administrative layer that sits quietly behind the scenes. Teacher
 - Personal learning profile — grades, attendance, and performance trends over time
 - Subject-level breakdown showing areas of strength and areas needing improvement
 - Quarter-over-quarter progress indicators, not just snapshots
+- **Mahusai Insights** — AI-generated personal insight cards surfacing what the student is doing well and where they need to focus, referencing DepEd MELC codes where relevant
 - Accessible on mobile, no app install required, works on 3G connections
 
 ### 👩‍🏫 Teacher View
 **Audience:** Public and private school teachers
 
 - Entire class roster in a single view — 100+ students, fully organized
-- AI-generated at-risk flags for students who are declining, frequently absent, or disengaging
+- AI-generated at-risk flags: color-coded High / Medium risk based on GWA + absences
+- Class statistics: total students, passing count, at-risk count, class GWA, attendance rate, perfect scores — all computed from the class JSON snapshot
 - Quick data entry: quiz scores, attendance, observations — minimal taps required
-- Auto-populated DepEd records (SF9, SF10) generated from existing data — no manual encoding
-- Class-wide learning gap summary: which competencies are most students missing?
-- Voice-to-text or typed teacher observations saved to individual student profiles
+- Auto-populated DepEd records (SF9, SF10) generated directly from the student JSON snapshot
+- **Mahusai Class Intelligence** — AI-generated class-level insight cards surfacing MELC weaknesses, students needing immediate intervention, and class-wide wins
 
 ### 🏫 Admin View
 **Audience:** School principals and administrators
@@ -92,106 +127,170 @@ Husai is an AI administrative layer that sits quietly behind the scenes. Teacher
 
 ---
 
-## 5. AI Architecture
+## 5. Mahusai Insights
 
-Husai uses a **hybrid AI architecture** — combining a fine-tuned open-source LLM for language tasks with purpose-trained ML models for prediction and classification tasks. This approach maximizes accuracy, keeps costs manageable, and allows the system to improve over time as school data accumulates.
+Mahusai Insights is Husai's AI-generated contextual intelligence layer — the feature visible in the student and teacher UI that translates raw data into plain-language, actionable observations.
 
----
+### How It Works
 
-### 5.1 At-Risk Detection Engine (Custom-Trained ML Model)
+```
+JSON Snapshot → Structured prompt → Claude API → Parsed insight cards → Cached in DB
+```
 
-**What it does:** Predicts which students are at risk of falling behind or dropping out, using attendance patterns, grade trends, submission rates, and behavioral signals.
+No student PII is ever sent to the API. The JSON passed to Claude contains only academic signals (grade trends, attendance rates, risk flags) — never names, IDs, or personal information.
 
-**Why we train our own:** Research consistently shows that gradient boosting models — specifically XGBoost, LightGBM, and CatBoost — achieve the highest performance on structured tabular education data (Mduma, 2023; Bertolini et al., 2024). A hybrid model combining Logistic Regression and Neural Networks has been shown to achieve 96% accuracy in dropout prediction on structured student data (Ullah et al., 2024). Training our own model on Philippine school data lets us account for local context: class sizes, DepEd grading periods, promotion policies, and regional variance.
+### Student Insight Cards
 
-**Training data inputs:**
-- Attendance records (daily/weekly patterns)
-- Quarterly grade trajectories per subject
-- Submission and quiz completion rates
-- Teacher observation flags
-- Historical dropout cohort data (where available from DepEd)
+Each student receives 3 insight cards per quarter:
 
-**Model selection strategy:** Begin with LightGBM as the baseline (strong performance on imbalanced datasets; Bertolini et al., 2024). Address class imbalance using SMOTE (Synthetic Minority Oversampling Technique). Add explainability layer using SHAP (SHapley Additive exPlanations) so teachers can understand *why* a student was flagged — not just that they were flagged (Ullah et al., 2024).
-
-**Research backing:**
-> Chung and Lee (2019) demonstrated the effectiveness of machine learning-based dropout early warning systems for high school students. Bertolini et al. (2024) found that boosting algorithms, particularly LightGBM and CatBoost with Optuna hyperparameter tuning, outperformed traditional classification methods in student dropout and success prediction. A systematic review by Mduma (2023) found Random Forest to be the most used algorithm for dropout prediction, achieving up to 99% accuracy in some configurations.
-
----
-
-### 5.2 Report Generation Engine (Fine-Tuned LLM)
-
-**What it does:** Automatically generates DepEd-formatted records (SF9, SF10), student progress narratives, and school health summaries from structured input data.
-
-**Base model:** We will fine-tune **Llama 3** (Meta's open-source LLM) using LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning. This avoids the cost of training a model from scratch while achieving performance tailored to our specific document formats.
-
-**Why fine-tune rather than use GPT-4 directly:**
-- Data privacy: student records should not leave our infrastructure
-- Cost control: inference costs at scale across thousands of schools require a self-hosted model
-- Compliance format accuracy: off-the-shelf LLMs do not know DepEd SF9/SF10 formats natively; fine-tuning on our document templates achieves higher accuracy
-
-**Why not train from scratch:** Training a language model from scratch requires billions of tokens and significant GPU compute. For our use case — structured-to-text generation within a narrow domain — fine-tuning a pre-trained model is the established best practice (Razafinirina et al., 2024).
-
-**Fine-tuning approach:**
-1. Collect anonymized DepEd record samples as training data
-2. Format as instruction-following pairs: `{student data JSON} → {completed SF9 narrative}`
-3. Fine-tune Llama 3 8B using LoRA on our document generation task
-4. Validate output against DepEd format standards
-
-**Research backing:**
-> Studies by Guo et al. (2024) using fine-tuned BART models demonstrated that lightweight LLMs, when trained on domain-specific datasets, generate effective and accurate feedback evaluations for student reports. Research from ETH Zurich (Chowdhury et al., 2025) highlights LLMs' scalable architectures for educational tasks including automated feedback and content generation. Leveraging prompt-based LLMs has shown strong potential for automated scoring and personalized feedback in education at scale (ScienceDirect, 2025).
-
----
-
-### 5.3 Learning Gap Analysis Engine (Lightweight Classification Model)
-
-**What it does:** Identifies which competencies — not just which students — are most commonly missed across a class. Surfaces patterns like "70% of Grade 5-B students are failing fractions" so teachers can re-teach targeted concepts.
-
-**Approach:** Item-level response analysis using a fine-tuned BERT classifier on quiz and assessment data. Maps incorrect responses to curriculum competency codes (aligned to DepEd's Most Essential Learning Competencies, or MELC framework).
-
----
-
-### 5.4 Natural Language Query Interface (LLM via API)
-
-**What it does:** Allows teachers and admins to ask plain-language questions — "Which students have been absent more than 5 times this month?" or "Which section has the lowest Math scores?" — without navigating dashboards.
-
-**Approach:** Uses Claude API (Anthropic) or GPT-4 via prompt engineering with tool-calling to translate natural language into structured database queries. This component does not require training — it leverages existing frontier LLM capabilities with carefully designed system prompts and a narrow permission set.
-
-**Why use an external API here:** Natural language understanding for ad-hoc queries is a task where frontier LLMs already excel. Training a bespoke model for query parsing is not cost-justified when APIs exist. Student data is never sent to the API — only schema definitions and sanitized query structures.
-
----
-
-### 5.5 AI Architecture Summary
-
-| Component | Approach | Rationale |
+| Card Type | Trigger Condition | Example Output |
 |---|---|---|
-| At-Risk Detection | Custom-trained LightGBM + Neural Net | Best performance on structured tabular education data |
-| Report Generation | Fine-tuned Llama 3 (LoRA) | Privacy, cost control, DepEd format accuracy |
-| Learning Gap Analysis | Fine-tuned BERT classifier | Competency-level mapping requires domain-specific training |
-| NL Query Interface | Claude / GPT-4 API via prompt engineering | Frontier LLMs already excel at NL-to-query tasks |
-| Explainability | SHAP + LIME | Ensures teachers understand AI flags, builds trust |
+| `alert` | Grade dropped 5+ points vs prior quarter | "Math score dropped 8 pts since Q1. Focus: fractions & word problems (MELC M5NS-IIf)." |
+| `strength` | Consistent improvement or highest subject grade | "Filipino improved consistently — now at 91. Excellent reading performance." |
+| `info` | Attendance note or neutral observation | "3 absences this quarter — at 90.4%, within DepEd's required threshold." |
+
+### Teacher / Class Intelligence Cards
+
+Teachers receive 4 class-level cards generated from the class JSON snapshot:
+
+| Card Type | Trigger Condition |
+|---|---|
+| `critical` | Multiple students declining 2+ consecutive quarters |
+| `warning` | A specific MELC competency with >50% of class scoring below 75 |
+| `info` | Neutral observation with a recommendation |
+| `positive` | Subject or metric where the class is measurably improving |
+
+### Caching Strategy
+
+Insights are cached alongside a hash of the source JSON. They regenerate only when underlying data changes or the teacher manually requests a refresh — keeping API costs predictable at scale.
+
+### What Mahusai Insights Is Not
+
+Mahusai Insights does not replace the at-risk ML model. The LightGBM model produces the `risk_score` and `risk_factors` written into the JSON snapshot. Mahusai Insights reads those outputs and translates them into language a teacher can act on. The ML model does the prediction; Mahusai Insights does the communication.
 
 ---
 
-## 6. Competition Alignment
+## 6. AI Architecture
+
+Husai uses a **hybrid AI architecture** — purpose-trained ML models for prediction, a fine-tuned LLM for document generation, and a frontier LLM API for insight generation and natural language querying.
+
+### 6.1 At-Risk Detection Engine (Custom-Trained LightGBM)
+
+Predicts student dropout and academic decline risk from attendance, grade trends, submission rates, and behavioral signals. Outputs a 0–1 risk score and a SHAP explanation of contributing factors written into the JSON snapshot.
+
+Training our own model captures Philippine-specific context: DepEd grading periods, class sizes of 100+, quarterly promotion policies, and regional variance that global datasets do not reflect. LightGBM with Optuna tuning outperforms all classical methods on structured student data (Bertolini et al., 2024). SMOTE handles class imbalance inherent in dropout datasets.
+
+### 6.2 Report Generation Engine (Fine-Tuned Llama 3 via QLoRA)
+
+Takes the student JSON snapshot as input and outputs DepEd-formatted narratives — SF9 remarks, progress reports, and school health summaries. Self-hosted via QLoRA fine-tuning so student data never leaves Husai's infrastructure.
+
+Off-the-shelf LLMs do not know DepEd SF9/SF10 formats natively. Fine-tuning on instruction pairs formatted as `{student JSON} → {SF9 narrative}` achieves format compliance that prompt engineering alone cannot guarantee (Guo et al., 2024; Razafinirina et al., 2024).
+
+### 6.3 Learning Gap Classifier (Fine-Tuned Multilingual BERT)
+
+Maps quiz and assessment responses to DepEd MELC competency codes. Uses `bert-base-multilingual-cased` to handle Filipino and Taglish text in teacher notes alongside English subject content.
+
+### 6.4 Mahusai Insights Engine (Claude API)
+
+Generates student and class-level insight cards from the JSON snapshot. Prompt-engineered to reference MELC codes when flagging weaknesses, use a warm tone for students, and a direct professional tone for teachers. Only anonymized academic signals are sent — never PII.
+
+### 6.5 Natural Language Query Interface (Claude API)
+
+Translates plain-language questions from teachers and admins into structured DB queries via tool-calling. Only schema definitions are sent to the API — never student records.
+
+### 6.6 AI Architecture Summary
+
+| Component | Approach | Where It Runs |
+|---|---|---|
+| At-Risk Detection | Custom LightGBM + SHAP | Self-hosted |
+| Report Generation | Fine-tuned Llama 3 8B (QLoRA) | Self-hosted |
+| Learning Gap Analysis | Fine-tuned multilingual BERT | Self-hosted |
+| Mahusai Insights | Claude API + JSON prompt | API (no PII sent) |
+| NL Query Interface | Claude API + tool-calling | API (no PII sent) |
+| Explainability | SHAP values → JSON snapshot | Self-hosted |
+
+---
+
+## 7. Long-Term Vision: From School Data to National Intelligence
+
+The most consequential long-term opportunity in Husai is not the school product — it is the **national dataset** that the school product creates.
+
+### 7.1 The Dataset Nobody Has
+
+Every school using Husai contributes anonymized, structured, longitudinal data: student performance trends by grade level, subject, region, and demographic. As Husai scales to thousands of schools, it becomes the first unified, real-time education dataset in Philippine history. No government agency, research institution, or private company currently has this.
+
+### 7.2 What This Data Enables Beyond Education
+
+Once sufficient data accumulates at national scale, Husai's dataset becomes an input layer for models that go far beyond school performance:
+
+**Urban Planning & Infrastructure**
+Train models that predict which barangays will face school-age population surges, where classroom and teacher shortages will emerge before they become crises, and how to prioritize school construction. Education enrollment is one of the most reliable leading indicators of urban growth.
+
+**Economic Mobility & Poverty Prediction**
+Model the relationship between early learning performance signals and regional labor market outcomes. Identify communities at highest risk of persistent poverty cycles — informing where conditional cash transfers (4Ps) or targeted skills programs should be deployed.
+
+**Public Health Correlation**
+Cross-reference attendance pattern drops with DOH regional health data to detect early signals of illness outbreaks affecting school-age children — a real-time epidemiological signal that currently does not exist at this resolution.
+
+**Workforce & Skills Forecasting**
+Predict regional skills gaps 5–10 years out based on MELC performance trends by subject and grade. Inform TESDA and higher education institutions about which competencies need the most investment in specific regions before the gap becomes a crisis.
+
+**Disaster & Climate Resilience**
+Track which schools and communities show the sharpest learning disruption following typhoons, floods, or other climate events. Build an evidence base for education resilience policy and emergency learning continuity programs.
+
+### 7.3 How It Works Technically
+
+All models trained on national Husai data operate on **fully anonymized, aggregated data** — never individual student records:
+
+```
+School-level JSON snapshots
+    → Anonymization & aggregation pipeline
+        → National data warehouse
+            → Research & policy prediction models
+            → Urban planning APIs (consumed by LGUs and DPWH)
+            → DepEd policy dashboard
+            → Research partnerships (PIDS, UP, ADB, World Bank)
+```
+
+Data governance is built in from day one: schools own their data, DepEd has read access to aggregated national views, and no individual student record is ever exposed beyond the school level.
+
+### 7.4 The Compounding Value Flywheel
+
+```
+More schools onboarded
+    → More data accumulated
+        → Better at-risk models       (benefits schools directly)
+        → Better urban planning inputs (benefits LGUs and government)
+        → Stronger policy evidence     (benefits DepEd and researchers)
+        → More institutional buy-in
+            → More schools onboarded
+```
+
+Each new school makes every existing model smarter. The data network effect is the compounding moat that makes Husai defensible at scale.
+
+---
+
+## 8. Competition Alignment
 
 ### Google.org Focus Areas
 
 | Focus Area | How Husai Addresses It |
 |---|---|
-| Knowledge, Skills & Learning | Directly expands access to quality education data for students, teachers, and policymakers — enabling better outcomes through visibility |
-| Stronger Communities | Empowers schools and local government to identify and respond to educational crises before they compound across generations |
-| Scientific Progress | Builds a national longitudinal education dataset — potentially the first unified one in the Philippines — enabling research-backed policy decisions |
+| Knowledge, Skills & Learning | Directly expands access to quality education data for students, teachers, and policymakers — enabling better outcomes through visibility and early intervention |
+| Stronger Communities | Empowers schools and local government to respond to educational crises before they compound. National data layer enables urban planning and community resilience models that strengthen communities beyond the classroom. |
+| Scientific Progress | Builds the first unified, real-time national education dataset in the Philippines — enabling research-backed policy decisions and cross-sector societal prediction models for urban planning, public health, and economic mobility |
 
 ### AI Awareness Among 1,000+ Community Members
 
-- Teacher onboarding workshops in public schools — every teacher who uses Husai becomes an informed AI user
-- Student-facing AI explanations — the platform surfaces why flags or suggestions were made, building AI literacy naturally
-- Parent summaries in plain Filipino — AI-generated progress reports introduce parents to AI-assisted education
+- Teacher onboarding workshops — every teacher who uses Husai becomes an informed AI user
+- Mahusai Insights for students — builds AI literacy naturally by surfacing why flags were made
+- Parent summaries in plain Filipino — introduces parents to AI-assisted education
 - DepEd pilot program — government partnership amplifies reach to thousands of schools rapidly
+- LGU and research partnerships for the national data layer — extends AI awareness to urban planners and policymakers
 
 ---
 
-## 7. Impact Projections
+## 9. Impact Projections
 
 ### Short-Term (Year 1)
 - Reduce teacher administrative time by an estimated 40–60% per grading period
@@ -199,60 +298,71 @@ Husai uses a **hybrid AI architecture** — combining a fine-tuned open-source L
 - Enable schools to identify at-risk students weeks earlier than current manual processes allow
 - Pilot with 10–50 public schools in Metro Manila
 
-### Long-Term (Year 3–5)
+### Medium-Term (Year 2–3)
 - Scale to all 47,000+ public schools in the Philippines
 - Provide DepEd with the first live, unified national education data layer
+- Begin anonymized data partnerships with PIDS, UP, and ADB for policy research
+- First urban planning and economic mobility models trained on Husai national dataset
+
+### Long-Term (Year 4–5)
 - Expand internationally to Indonesia, Vietnam, and India with localized compliance formats
 - Become foundational infrastructure for evidence-based education policy in Southeast Asia
+- National dataset powering urban planning, workforce forecasting, and public health correlation models
+- First country-level education intelligence platform built bottom-up from classroom data
 
 ---
 
-## 8. MVP Scope
+## 10. MVP Scope
 
 | Feature | Included in MVP |
 |---|---|
 | Student View: profile, grades, attendance, subject breakdown | ✅ |
-| Teacher View: roster, at-risk flags, quick data entry, SF9/SF10 draft generation | ✅ |
+| Mahusai Insights: student insight cards (alert / strength / info) | ✅ |
+| Teacher View: roster, at-risk flags, class statistics, quick data entry | ✅ |
+| Mahusai Class Intelligence: class insight cards | ✅ |
+| SF9/SF10 draft generation from JSON snapshot | ✅ |
 | Admin View: school dashboard, section comparisons, dropout radar | ✅ |
-| At-risk ML model (LightGBM baseline) | ✅ |
-| Report generation (Llama 3 fine-tuned) | ✅ |
-| NL query interface (API-based) | ✅ |
+| JSON-first data architecture (single snapshot per student/class) | ✅ |
+| At-risk ML model (LightGBM + SHAP) | ✅ |
+| Report generation (Llama 3 fine-tuned via QLoRA) | ✅ |
+| NL query interface (Claude API) | ✅ |
 | DepEd national heatmap view | 🔜 Roadmap |
-| Multi-school / district federation | 🔜 Roadmap |
+| National data warehouse & anonymization pipeline | 🔜 Roadmap |
+| Urban planning & policy prediction models | 🔜 Roadmap |
+| Multi-country localization | 🔜 Roadmap |
 
-**Platform:** Responsive web application. Mobile-friendly, no install required, designed to work on 3G connections common in provincial Philippine schools. English and Filipino (Tagalog) interfaces for all teacher and student-facing views.
+**Platform:** Responsive web application. Mobile-friendly, no install required, designed to work on 3G connections. English and Filipino (Tagalog) interfaces for all teacher and student-facing views.
 
 ---
 
-## 9. References
+## 11. References
 
-Abasola, 2024 as cited in:
-- Global Scientific Journal (GSJ). (2025). *Public High School Teachers' Welfare and Quality of Teaching Upon Implementation of the Immediate Removal of Administrative Tasks in Candelaria, Zambales.* GSJ Volume 13, Issue 2. ISSN 2320-9186. https://www.globalscientificjournal.com/researchpaper/PUBLIC_HIGH_SCHOOL_TEACHERS_WELFARE_AND_QUALITY_OF_TEACHING_UPON_IMPLEMENTATION_OF_THE_IMMEDIATE_REMOVAL_OF_ADMINISTRATIVE_TASKS_IN_CANDELARIA_ZAMBALES.pdf
+- Abasola, 2024 as cited in Global Scientific Journal (GSJ). (2025). *Public High School Teachers' Welfare and Quality of Teaching Upon Implementation of the Immediate Removal of Administrative Tasks in Candelaria, Zambales.* GSJ Volume 13, Issue 2. https://www.globalscientificjournal.com/researchpaper/PUBLIC_HIGH_SCHOOL_TEACHERS_WELFARE_AND_QUALITY_OF_TEACHING_UPON_IMPLEMENTATION_OF_THE_IMMEDIATE_REMOVAL_OF_ADMINISTRATIVE_TASKS_IN_CANDELARIA_ZAMBALES.pdf
 
 - Bertolini, R., et al. (2024). *Supervised machine learning algorithms for predicting student dropout and academic success: a comparative study.* Discover Artificial Intelligence, Springer Nature. https://link.springer.com/article/10.1007/s44163-023-00079-z
 
-- Chowdhury, S. P., Daheim, N., Kochmar, E., Macina, J., Rooein, D., Sachan, M., & Sonkar, S. (2025). *Large Language Models for Education: Understanding the Needs of Stakeholders, Current Capabilities and the Path Forward.* ETH Zurich / TU Darmstadt / MBZUAI / Bocconi University / Rice University. Proceedings of the 20th Workshop on Innovative Use of NLP for Building Educational Applications. https://aclanthology.org/2025.bea-1.1.pdf
+- Chowdhury, S. P., et al. (2025). *Large Language Models for Education: Understanding the Needs of Stakeholders, Current Capabilities and the Path Forward.* Proceedings of the 20th Workshop on Innovative Use of NLP for Building Educational Applications. https://aclanthology.org/2025.bea-1.1.pdf
 
 - Chung, J. Y., & Lee, S. (2019). *Dropout early warning systems for high school students using machine learning.* Children and Youth Services Review, 96, 346–353. https://doi.org/10.1016/j.childyouth.2018.11.030
 
 - EDCOM 2. (2025). *Removing the Burden of Administration from Teachers.* Second Congressional Commission on Education. https://edcom2.gov.ph/publications/removing-the-burden-of-administration-from-teachers/
 
-- Guo, X., et al. (2024). *Harnessing large language models to auto-evaluate student project reports.* Computers and Education: Artificial Intelligence. ScienceDirect. https://www.sciencedirect.com/science/article/pii/S2666920X24000717
+- Guo, X., et al. (2024). *Harnessing large language models to auto-evaluate student project reports.* Computers and Education: Artificial Intelligence. https://www.sciencedirect.com/science/article/pii/S2666920X24000717
 
-- International Journal of Research and Innovation in Social Science (IJRISS). (2025). *Ancillary Duties and Their Impact on Filipino Teachers' Workload and Job Satisfaction.* IJRISS Volume 9, Issue 3, pp. 846–855. https://rsisinternational.org/journals/ijriss/Digital-Library/volume-9-issue-3/846-855.pdf
+- IJRISS. (2025). *Ancillary Duties and Their Impact on Filipino Teachers' Workload and Job Satisfaction.* IJRISS Volume 9, Issue 3, pp. 846–855. https://rsisinternational.org/journals/ijriss/Digital-Library/volume-9-issue-3/846-855.pdf
 
 - Mduma, N. (2023). *Predicting Student Dropout Based on Machine Learning and Deep Learning: A Systematic Review.* EAI Endorsed Transactions on Scalable Information Systems. https://publications.eai.eu/index.php/sis/article/view/3586
 
-- Razafinirina, M. A., et al. (2024). *Large Language Models for Education: Survey, Trends and Challenges.* Journal of Intelligent Learning Systems and Applications, 16, 448–480. SCIRP. https://www.scirp.org/pdf/jilsa2024164_79601651.pdf
+- Razafinirina, M. A., et al. (2024). *Large Language Models for Education: Survey, Trends and Challenges.* Journal of Intelligent Learning Systems and Applications, 16, 448–480. https://www.scirp.org/pdf/jilsa2024164_79601651.pdf
 
 - ScienceDirect. (2025). *Leveraging prompt-based LLMs for automated scoring and feedback generation in higher education.* Computers & Education: Artificial Intelligence. https://www.sciencedirect.com/science/article/pii/S0360131525002799
 
 - Tarraya, H. (2023). *Teachers' Workload Policy: Its Impact on Philippine Public School Teachers.* Puissant, Vol. 4. https://puissant.stepacademic.net/puissant/article/view/246
 
-- Ullah, I., et al. (2024). *A novel AI-driven model for student dropout risk analysis with explainable AI insights.* Computers and Education: Artificial Intelligence, ScienceDirect. https://www.sciencedirect.com/science/article/pii/S2666920X24001553
+- Ullah, I., et al. (2024). *A novel AI-driven model for student dropout risk analysis with explainable AI insights.* Computers and Education: Artificial Intelligence. https://www.sciencedirect.com/science/article/pii/S2666920X24001553
 
 - Walker, S. (2024, December 26). *Filipino teachers need workload reform.* Philippine Daily Inquirer Opinion. IDInsight. https://opinion.inquirer.net/179491/filipino-teachers-need-workload-reform
 
 ---
 
-*Husai — Every student deserves to be seen. Every teacher deserves to be supported.*
+*Husai v2.0 — Every student deserves to be seen. Every teacher deserves to be supported. Every community deserves to be understood.*

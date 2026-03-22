@@ -5,23 +5,48 @@
 
 ## Overview
 
-Husai uses three custom-trained models and one API-based component. This document covers training steps for the two models you need to train yourself:
+Husai uses three custom-trained models and two API-based components. All custom models are trained on Google Colab and served self-hosted — student data never leaves Husai's infrastructure. The two API components (Mahusai Insights and NL Query) use the Claude API but only ever receive anonymized academic signals, never PII.
 
 | Model | Type | Colab GPU Needed | Est. Training Time |
 |---|---|---|---|
 | **At-Risk Detection Engine** | LightGBM (custom-trained) | T4 (free tier) | 10–30 min |
 | **Report Generation Engine** | Llama 3 8B fine-tuned via QLoRA | A100 (Colab Pro) or T4 with patience | 1–3 hrs |
-| Learning Gap Classifier | Fine-tuned BERT | T4 (free tier) | 30–60 min |
-| NL Query Interface | Claude / GPT-4 API | No training needed | — |
+| **Learning Gap Classifier** | Fine-tuned multilingual BERT | T4 (free tier) | 30–60 min |
+| Mahusai Insights | Claude API — no training needed | — | — |
+| NL Query Interface | Claude API — no training needed | — | — |
 
 > **Colab tier recommendation:** Use **Colab Free** for LightGBM and BERT. Use **Colab Pro** (A100 40GB) for Llama 3 fine-tuning. If budget is tight, T4 + QLoRA + Unsloth works but will take longer.
+
+---
+
+## How Training Fits into the JSON Architecture
+
+All three trained models read from and write back to the **student JSON snapshot** — the single source of truth in Husai's data architecture. Understanding this flow will help you see why each model's output is structured the way it is.
+
+```
+DB → student JSON snapshot
+         │
+         ├── LightGBM reads: grades, attendance, submission rates
+         │        └── writes: flags.risk_score, flags.risk_factors (+ SHAP values)
+         │
+         ├── BERT reads: quiz/assessment data
+         │        └── writes: melc_weak_areas[]
+         │
+         ├── Llama 3 reads: entire snapshot
+         │        └── outputs: SF9 / SF10 narrative (generated on demand, not written back)
+         │
+         └── Claude API reads: anonymized snapshot (no PII)
+                  └── writes: insights.cards[]
+```
+
+When you train each model, you are training it to operate on this JSON structure. The feature sets you train on today should map directly to fields already present in the snapshot — because those same features will feed the national-scale models as data accumulates.
 
 ---
 
 ## Model 1 — At-Risk Detection Engine (LightGBM)
 
 ### What It Does
-Predicts which students are at risk of falling behind or dropping out based on attendance, grades, submission rates, and behavioral signals. Outputs a risk score (0–1) and a SHAP explanation of which factors drove the flag.
+Predicts which students are at risk of falling behind or dropping out based on attendance, grades, submission rates, and behavioral signals. Outputs a risk score (0–1) and a SHAP explanation of which factors drove the flag — both written into `flags` in the student JSON snapshot.
 
 ### Research Basis
 Bertolini et al. (2024) found that boosting algorithms — particularly LightGBM and CatBoost with Optuna hyperparameter tuning — outperformed all traditional classification methods for student dropout prediction. SMOTE significantly improved model accuracy on imbalanced datasets (Bertolini et al., 2024). LightGBM achieved an F1-score of 0.840 in a university-scale study with 20,050 student records (Chung & Lee study replicated in Kim et al., 2023, MDPI Applied Sciences).
@@ -30,37 +55,20 @@ Bertolini et al. (2024) found that boosting algorithms — particularly LightGBM
 
 ### Step 1 — Get the Datasets
 
-Use all three datasets and merge them. More data = more robust generalization.
+You already have all four datasets locally. Upload them to Google Drive under `My Drive/datasets/` before starting Colab.
 
-**Dataset A — Primary (UCI / Kaggle)**
-- Name: *Predict Students' Dropout and Academic Success*
-- Source: UCI Machine Learning Repository
-- URL: https://archive.ics.uci.edu/dataset/697/predict+students+dropout+and+academic+success
-- Also on Kaggle: https://www.kaggle.com/datasets/thedevastator/higher-education-predictors-of-student-retention
-- Records: 4,424 students
-- Features: Academic path, demographics, socioeconomic factors, semester grades
-- License: CC BY 4.0
-- Citation: Realinho, V., Vieira Martins, M., Machado, J., & Baptista, L. (2021). *Predict Students' Dropout and Academic Success* [Dataset]. UCI ML Repository. https://doi.org/10.24432/C5MC89
+| Your Local File | Drive Path | Key Features |
+|---|---|---|
+| `at-risk-detection/at-risk-detection.csv` | `datasets/at-risk-detection/at-risk-detection.csv` | Semester grades, enrollment status, socioeconomic signals |
+| `behavioral-dataset-2/merged_dataset.csv` | `datasets/behavioral-dataset-2/merged_dataset.csv` | StudyHours, Attendance, Motivation, FinalGrade (0–3 scale) |
+| `behavioral-engagement-signals/*.csv` | `datasets/behavioral-engagement-signals/` | Per-student attendance, homework, exam scores (5 files) |
+| `student-performance-dataset/xAPI-Edu-Data.csv` | `datasets/student-performance-dataset/xAPI-Edu-Data.csv` | Engagement signals, raised hands, resource access, absence days |
 
-**Dataset B — Behavioral / Engagement Signals**
-- Name: *Student Performance and Attendance Dataset*
-- Source: Kaggle
-- URL: https://www.kaggle.com/datasets/marvyaymanhalim/student-performance-and-attendance-dataset
-- Features: Attendance, study hours, assignment completion, exam scores, final grades
-
-**Dataset C — Extended Behavioral Dataset (14,003 records)**
-- Name: *Student Performance and Learning Behavior Dataset*
-- Source: Zenodo (open access)
-- URL: https://zenodo.org/records/16459132
-- Records: 14,003 students, 16 attributes
-- Features: StudyHours, Attendance, AssignmentCompletion, Motivation, StressLevel, ExamScore, FinalGrade
-- Note: Merged and anonymized, no PII
-
-**Dataset D — xAPI Behavioral Data**
-- Name: *Students' Academic Performance Dataset (xAPI-Edu-Data)*
-- Source: Kaggle
-- URL: https://www.kaggle.com/datasets/aljarah/xAPI-Edu-Data
-- Features: Engagement signals, resource access, discussion participation, class performance
+**Dataset sources and licenses:**
+- **Dataset A** — *Predict Students' Dropout and Academic Success*, UCI ML Repository. CC BY 4.0. https://archive.ics.uci.edu/dataset/697/predict+students+dropout+and+academic+success — Citation: Realinho, V., et al. (2021). https://doi.org/10.24432/C5MC89
+- **Dataset B** — *Student Performance and Learning Behavior Dataset*, Zenodo. Open Access. https://zenodo.org/records/16459132
+- **Dataset C** — *Student Performance and Attendance Dataset*, Kaggle. https://www.kaggle.com/datasets/marvyaymanhalim/student-performance-and-attendance-dataset
+- **Dataset D** — *Students' Academic Performance Dataset (xAPI-Edu-Data)*, Kaggle. CC BY 4.0. https://www.kaggle.com/datasets/aljarah/xAPI-Edu-Data
 
 ---
 
@@ -84,25 +92,30 @@ drive.mount('/content/drive')
 # Step 3: Load, Clean, and Merge Your Datasets
 # -----------------------------------------------
 # Run each cell in order in Google Colab.
-# Upload your CSV files to Colab first (see Cell 0).
+# All files should already be in your Google Drive under /datasets/
 
 # ─────────────────────────────────────────────
-# CELL 0 — Upload your files to Colab
+# CELL 0 — Mount Drive and confirm files
 # ─────────────────────────────────────────────
-from google.colab import files
 from google.colab import drive
+import os
 
-# Mount Drive so you can save progress
 drive.mount('/content/drive')
 
-# Upload all CSVs at once — a file picker will appear
-uploaded = files.upload()
-
-# After uploading, confirm what was received
-import os
-print("Files uploaded:")
-for f in uploaded:
-    print(f"  {f}")
+BASE = '/content/drive/MyDrive/datasets'
+print("Checking dataset paths...")
+paths = [
+    f'{BASE}/at-risk-detection/at-risk-detection.csv',
+    f'{BASE}/behavioral-dataset-2/merged_dataset.csv',
+    f'{BASE}/behavioral-engagement-signals/students.csv',
+    f'{BASE}/behavioral-engagement-signals/attendance.csv',
+    f'{BASE}/behavioral-engagement-signals/homework.csv',
+    f'{BASE}/behavioral-engagement-signals/performance.csv',
+    f'{BASE}/student-performance-dataset/xAPI-Edu-Data.csv',
+]
+for p in paths:
+    status = "✅" if os.path.exists(p) else "❌ NOT FOUND"
+    print(f"  {status}  {p}")
 
 
 # ─────────────────────────────────────────────
@@ -206,6 +219,7 @@ print("=== Behavioral Dataset ===")
 print(f"Shape: {df_behav.shape}")
 print(f"FinalGrade distribution:\n{df_behav['FinalGrade'].value_counts()}")
 print(f"\nFirst row preview:\n{df_behav.head(1).T}")
+
 
 # ─────────────────────────────────────────────
 # CELL 5 — Process Dataset B
@@ -345,7 +359,7 @@ print(f"At-risk distribution:\n{df_engagement_clean['at_risk'].value_counts()}")
 # (Behavioral engagement signals — xAPI)
 # ─────────────────────────────────────────────
 
-df_xapi = pd.read_csv('xAPI-Edu-Data.csv')
+df_xapi = pd.read_csv('/content/drive/MyDrive/datasets/student-performance-dataset/xAPI-Edu-Data.csv')
 
 print("=== xAPI Dataset ===")
 print(f"Shape: {df_xapi.shape}")
@@ -388,14 +402,12 @@ print(f"At-risk distribution:\n{df_xapi_clean['at_risk'].value_counts()}")
 # Use outer merge on shared columns, fill gaps with NaN
 # ─────────────────────────────────────────────
 
-# All datasets have 'at_risk' and 'source' — merge on shared feature columns
-# Features common across most datasets:
 SHARED_FEATURES = [
-    'avg_grade_s1',       # Exam / semester grade
-    'attendance_rate',    # Attendance percentage
+    'avg_grade_s1',           # Exam / semester grade
+    'attendance_rate',        # Attendance percentage
     'assignment_completion',  # Homework / assignment completion
     'class_participation',    # Engagement in class
-    'gender',             # Gender (encoded as 0/1)
+    'gender',                 # Gender (encoded as 0/1)
     'at_risk',
     'source'
 ]
@@ -465,8 +477,8 @@ print("\nStep 3 complete. Proceed to Step 4 (SMOTE + Model Training).")
 from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import SMOTE
 
-X = df.drop('at_risk', axis=1)
-y = df['at_risk']
+X = df_final.drop('at_risk', axis=1)
+y = df_final['at_risk']
 
 # Split BEFORE applying SMOTE — never apply SMOTE to test data
 X_train, X_test, y_train, y_test = train_test_split(
@@ -541,7 +553,7 @@ print(f"ROC-AUC: {roc_auc_score(y_test, y_prob):.4f}")
 
 ### Step 7 — Add SHAP Explainability
 
-This is critical for Husai — teachers need to understand *why* a student was flagged.
+This is critical for Husai — teachers need to understand *why* a student was flagged. SHAP values are what populate `flags.risk_factors` in the student JSON snapshot.
 
 ```python
 import shap
@@ -563,6 +575,16 @@ def explain_student(student_index):
         matplotlib=True
     )
     plt.savefig(f'/content/drive/MyDrive/husai/student_{student_index}_explanation.png')
+
+# Get top 3 risk factors for a student → this feeds flags.risk_factors in the JSON
+def get_risk_factors(student_row):
+    sv = explainer.shap_values(student_row)[1][0]
+    factors = sorted(
+        zip(X_test.columns, sv),
+        key=lambda x: abs(x[1]),
+        reverse=True
+    )
+    return [{"feature": f, "impact": round(v, 4)} for f, v in factors[:3]]
 ```
 
 ---
@@ -571,13 +593,13 @@ def explain_student(student_index):
 
 ```python
 import joblib
+import json
 
 # Save model
 joblib.dump(best_model, '/content/drive/MyDrive/husai/at_risk_model.pkl')
 print("Model saved.")
 
 # Save feature names for inference
-import json
 with open('/content/drive/MyDrive/husai/feature_names.json', 'w') as f:
     json.dump(list(X.columns), f)
 ```
@@ -603,7 +625,7 @@ Based on Bertolini et al. (2024) and Kim et al. (2023):
 ## Model 2 — Report Generation Engine (Llama 3 QLoRA Fine-Tune)
 
 ### What It Does
-Takes structured student data as input (grades, attendance, teacher notes) and outputs a filled DepEd-formatted narrative — SF9 remarks, progress reports, and school health summaries. Teachers review and approve in seconds instead of writing from scratch.
+Takes the **entire student JSON snapshot** as input and outputs a filled DepEd-formatted narrative — SF9 remarks, progress reports, and school health summaries. Teachers review and approve in seconds instead of writing from scratch.
 
 ### Research Basis
 Fine-tuning a pre-trained LLM on domain-specific instruction pairs is the established best practice for narrow document generation tasks (Razafinirina et al., 2024). QLoRA — loading the model in 4-bit and training only low-rank adapter matrices — achieves performance comparable to full fine-tuning while fitting in a single Colab GPU (Dettmers et al., 2023, via Unsloth implementation). Guo et al. (2024) demonstrated that fine-tuned LLMs on structured student data can generate effective and accurate evaluation narratives.
@@ -617,12 +639,12 @@ Full fine-tuning of Llama 3 8B requires multiple 80GB A100s and weeks of trainin
 
 You need to build this dataset yourself — it doesn't exist publicly because DepEd formats are specific to the Philippines. This is your competitive moat.
 
-**Format:** JSONL instruction pairs. Each record looks like this:
+**Format:** JSONL instruction pairs. The `input` field should be the full student JSON snapshot — the same structure your DB already produces — so Llama 3 learns to read exactly the format you'll pass it in production.
 
 ```json
 {
   "instruction": "Generate an SF9 quarterly narrative for the following student.",
-  "input": "Name: Maria Santos | Grade: 5 | Section: Rizal | Quarter: Q1 | Math: 85 | Science: 78 | Filipino: 90 | English: 82 | MAPEH: 88 | Attendance: 44/45 days | Teacher notes: Participates actively in class discussions. Needs improvement in fractions.",
+  "input": "{entire student JSON snapshot as string}",
   "output": "Maria Santos demonstrated satisfactory performance in Grade 5 during the First Quarter. She showed strength in Filipino and MAPEH, earning grades of 90 and 88, respectively. Her attendance record was excellent at 44 out of 45 school days. Areas for continued development include Mathematics, particularly in fraction operations, where targeted review is recommended. Maria's active participation in class discussions is commendable and contributes positively to classroom dynamics."
 }
 ```
@@ -633,7 +655,7 @@ You need to build this dataset yourself — it doesn't exist publicly because De
 3. Clean and format into JSONL
 4. Aim for 500–1,000 pairs minimum; 2,000+ for best results
 
-**Save as:** `husai_sf9_dataset.jsonl` and upload to your Google Drive.
+**Save as:** `husai_sf9_dataset.jsonl` and upload to `/content/drive/MyDrive/husai/` in your Drive.
 
 ---
 
@@ -756,8 +778,8 @@ trainer = SFTTrainer(
     dataset_num_proc=2,
     packing=False,
     args=TrainingArguments(
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,     # Effective batch size = 8
+        per_device_train_batch_size=2,         # Reduce to 1 on T4
+        gradient_accumulation_steps=4,         # Increase to 8 on T4
         warmup_steps=10,
         num_train_epochs=3,
         learning_rate=2e-4,
@@ -833,10 +855,12 @@ print("Model saved.")
 
 ---
 
-## Model 3 — Learning Gap Classifier (BERT)
+## Model 3 — Learning Gap Classifier (Multilingual BERT)
 
 ### What It Does
-Maps incorrect quiz and assessment responses to DepEd MELC (Most Essential Learning Competency) codes. Identifies *which specific competency* a student is missing — not just that they failed a subject.
+Maps incorrect quiz and assessment responses to DepEd MELC (Most Essential Learning Competency) codes. Identifies *which specific competency* a student is missing — not just that they failed a subject. Populates `melc_weak_areas[]` in the class JSON snapshot.
+
+Uses `bert-base-multilingual-cased` specifically to handle Filipino, Taglish, and English text in teacher notes alongside English subject content — critical for Philippine classroom data.
 
 ### Dataset
 
@@ -847,7 +871,15 @@ Maps incorrect quiz and assessment responses to DepEd MELC (Most Essential Learn
 - Features: Subject grades broken into component scores, study habits, absences
 - Original paper: Cortez, P. & Silva, A. (2008). Using Data Mining to Predict Secondary School Student Performance. EUROSIS.
 
-You will also need to create a small MELC mapping file manually — a CSV that maps quiz topic tags to DepEd MELC codes. This is straightforward since DepEd publishes the MELC framework publicly at: https://www.deped.gov.ph/
+You will also need to create a **MELC mapping CSV** manually — a lookup table that maps quiz topic tags to DepEd MELC codes. DepEd publishes the full MELC framework at: https://www.deped.gov.ph/
+
+**MELC mapping CSV format:**
+```csv
+subject,topic_tag,melc_code,description
+Math,fractions,M5NS-IIf,Adding fractions with dissimilar denominators
+Math,decimals,M5NS-IId,Multiplying decimals up to 2 decimal places
+Filipino,pagbasa,F5RC-IIIa,Natutukoy ang mga detalye ng tekstong napakinggan
+```
 
 ---
 
@@ -861,9 +893,8 @@ from transformers import BertTokenizer, BertForSequenceClassification, Trainer, 
 from datasets import Dataset
 import torch
 
-# Load BERT
+# Load multilingual BERT — handles Filipino/Tagalog text in teacher notes
 tokenizer = BertTokenizer.from_pretrained('bert-base-multilingual-cased')
-# Use multilingual BERT — it handles Filipino/Tagalog text in teacher notes
 model = BertForSequenceClassification.from_pretrained(
     'bert-base-multilingual-cased',
     num_labels=NUM_MELC_CODES  # Set to number of MELC competency codes in your mapping
@@ -897,12 +928,12 @@ training_args = TrainingArguments(
 | Model | Recommended Runtime | Free Tier Viable? | Notes |
 |---|---|---|---|
 | LightGBM (Model 1) | T4 GPU or CPU | ✅ Yes | Fast even on CPU |
-| Llama 3 QLoRA (Model 2) | A100 (Colab Pro) | ⚠️ T4 works but slow | Use Unsloth for T4 |
+| Llama 3 QLoRA (Model 2) | A100 (Colab Pro) | ⚠️ T4 works but slow | Use Unsloth; `batch_size=1`, `grad_accum=8` on T4 |
 | BERT Classifier (Model 3) | T4 GPU | ✅ Yes | Trains in < 1 hr |
 
 **Tips for managing Colab sessions:**
-- Mount Google Drive at the start of every session — Colab resets storage
-- Save checkpoints every epoch (`save_strategy="epoch"`) so you never lose progress on a disconnect
+- Mount Google Drive at the start of every session — Colab resets storage on disconnect
+- Save checkpoints every epoch (`save_strategy="epoch"`) so you never lose progress
 - For Llama 3 on T4: reduce `per_device_train_batch_size` to 1 and increase `gradient_accumulation_steps` to 8 to avoid OOM errors
 - Use `torch.cuda.empty_cache()` between cells if you're running out of VRAM
 
@@ -912,13 +943,30 @@ training_args = TrainingArguments(
 
 | Dataset | Model | Source | License |
 |---|---|---|---|
-| UCI Dropout & Academic Success | At-Risk (Model 1) | https://archive.ics.uci.edu/dataset/697 | CC BY 4.0 |
-| Student Performance & Attendance | At-Risk (Model 1) | https://www.kaggle.com/datasets/marvyaymanhalim/student-performance-and-attendance-dataset | Kaggle |
-| Zenodo Learning Behavior (14k records) | At-Risk (Model 1) | https://zenodo.org/records/16459132 | Open Access |
-| xAPI Edu-Data | At-Risk (Model 1) | https://www.kaggle.com/datasets/aljarah/xAPI-Edu-Data | CC BY 4.0 |
-| Student Performance (Math/Portuguese) | BERT (Model 3) | https://www.kaggle.com/datasets/larsen0966/student-performance-data-set | CC BY 4.0 |
-| SF9/SF10 instruction pairs | Llama 3 (Model 2) | **Build yourself** — collect from teachers + synthetic generation | Proprietary |
+| UCI Dropout & Academic Success (`at-risk-detection.csv`) | At-Risk (Model 1) | https://archive.ics.uci.edu/dataset/697 | CC BY 4.0 |
+| Student Learning Behavior (`merged_dataset.csv`) | At-Risk (Model 1) | https://zenodo.org/records/16459132 | Open Access |
+| Behavioral Engagement Signals (5 files) | At-Risk (Model 1) | https://www.kaggle.com/datasets/marvyaymanhalim/student-performance-and-attendance-dataset | Kaggle |
+| xAPI Edu-Data (`xAPI-Edu-Data.csv`) | At-Risk (Model 1) | https://www.kaggle.com/datasets/aljarah/xAPI-Edu-Data | CC BY 4.0 |
+| Student Performance Math/Portuguese | BERT (Model 3) | https://www.kaggle.com/datasets/larsen0966/student-performance-data-set | CC BY 4.0 |
+| SF9/SF10 instruction pairs (`husai_sf9_dataset.jsonl`) | Llama 3 (Model 2) | **Build yourself** — collect from teachers + synthetic generation via Claude API | Proprietary |
 | DepEd MELC Framework | BERT labels | https://www.deped.gov.ph/ | Public domain |
+
+---
+
+## The National Data Pipeline (Future)
+
+As Husai scales, the trained models become the foundation for a national intelligence layer. The same JSON snapshots that feed individual school features are anonymized, aggregated, and fed into a national data warehouse that trains broader societal prediction models.
+
+```
+School JSON snapshots (millions, fully anonymized)
+    → National data warehouse
+        → Urban growth prediction models  (school enrollment as leading indicator)
+        → Economic mobility models        (early learning gaps → regional poverty risk)
+        → Public health correlation       (attendance drops → illness outbreak signals)
+        → Workforce skills forecasting    (MELC trends → future labor market gaps)
+```
+
+The models you train now — particularly the at-risk detection engine — will serve double duty: predicting individual student outcomes at the school level, and contributing features to the national models as data accumulates. This is why structuring your features around the JSON schema from the beginning matters. Every feature you train on today is a feature the national models can also use tomorrow.
 
 ---
 
@@ -944,4 +992,4 @@ training_args = TrainingArguments(
 
 ---
 
-*Husai Training Guide v1.0 — For internal use*
+*Husai Training Guide v2.0 — For internal use*
