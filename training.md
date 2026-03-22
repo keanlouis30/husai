@@ -77,6 +77,9 @@ drive.mount('/content/drive')
 
 ---
 
+### Step 3 — Load, Clean, and Merge Your Datasets
+
+```python
 # HUSAI — Model 1: At-Risk Detection
 # Step 3: Load, Clean, and Merge Your Datasets
 # -----------------------------------------------
@@ -115,8 +118,7 @@ for f in uploaded:
 import pandas as pd
 import numpy as np
 
-# NOTE: This file uses semicolons as delimiters
-df_uci = pd.read_csv('at-risk-detection.csv', delimiter=';')
+df_uci = pd.read_csv('/content/drive/MyDrive/datasets/at-risk-detection/at-risk-detection.csv', delimiter=';')
 
 print("=== UCI Dataset ===")
 print(f"Shape: {df_uci.shape}")
@@ -196,36 +198,39 @@ print(f"At-risk distribution:\n{df_uci_clean['at_risk'].value_counts()}")
 # CELL 4 — Load Dataset B: merged_dataset.csv
 # (Behavioral + engagement signals)
 # ─────────────────────────────────────────────
-df_behav = pd.read_csv('merged_dataset.csv', delimiter='\t')
+import pandas as pd
+
+df_behav = pd.read_csv('/content/drive/MyDrive/datasets/behavioral-dataset-2/merged_dataset.csv')
 
 print("=== Behavioral Dataset ===")
 print(f"Shape: {df_behav.shape}")
 print(f"FinalGrade distribution:\n{df_behav['FinalGrade'].value_counts()}")
 print(f"\nFirst row preview:\n{df_behav.head(1).T}")
 
-
 # ─────────────────────────────────────────────
 # CELL 5 — Process Dataset B
 # FinalGrade → binary at_risk label
 # ─────────────────────────────────────────────
 
+import pandas as pd
+
+# Load the dataset
+df_behav = pd.read_csv('/content/drive/MyDrive/datasets/behavioral-dataset-2/merged_dataset.csv')
+
 # Check what values FinalGrade has
 print("Unique FinalGrade values:", df_behav['FinalGrade'].unique())
 
-# If FinalGrade is a letter grade (A/B/C/D/F):
-# at_risk = 1 if grade is D or F
+# Define at_risk logic for the 0-3 scale
+# (Adjusting threshold because < 60 would mark everyone as at-risk)
 if df_behav['FinalGrade'].dtype == object:
     df_behav['at_risk'] = df_behav['FinalGrade'].isin(['D', 'F']).astype(int)
-# If FinalGrade is numeric (0-100):
 else:
-    df_behav['at_risk'] = (df_behav['FinalGrade'] < 60).astype(int)
+    # Assuming lower numbers (0, 1) represent lower grades/at-risk status
+    df_behav['at_risk'] = (df_behav['FinalGrade'] <= 1).astype(int)
 
-# Encode categorical columns
-df_behav['gender_enc'] = (df_behav['Gender'].str.lower() == 'male').astype(int)
-
-# Map LearningStyle to numeric
-learning_style_map = {'visual': 0, 'auditory': 1, 'kinesthetic': 2, 'reading': 3}
-df_behav['learning_style_enc'] = df_behav['LearningStyle'].str.lower().map(learning_style_map).fillna(0)
+# Columns are already numeric, so we remove .str accessors to avoid AttributeError
+df_behav['gender_enc'] = df_behav['Gender']
+df_behav['learning_style_enc'] = df_behav['LearningStyle']
 
 # Select features
 behav_features = [
@@ -242,7 +247,7 @@ df_behav_clean = df_behav_clean.rename(columns={
     'Attendance': 'attendance_rate',
     'Motivation': 'motivation_score',
     'AssignmentCompletion': 'assignment_completion',
-    'ExamScore': 'avg_grade_s1',           # Treat exam score as proxy for semester grade
+    'ExamScore': 'avg_grade_s1',
     'StressLevel': 'stress_level',
     'Discussions': 'class_participation',
     'OnlineCourses': 'extra_resources',
@@ -263,10 +268,10 @@ print(f"At-risk distribution:\n{df_behav_clean['at_risk'].value_counts()}")
 # These have Student_ID as the join key
 # ─────────────────────────────────────────────
 
-df_students    = pd.read_csv('students.csv', delimiter='\t')
-df_attendance  = pd.read_csv('attendance.csv', delimiter='\t')
-df_homework    = pd.read_csv('homework.csv', delimiter='\t')
-df_performance = pd.read_csv('performance.csv', delimiter='\t')
+df_students    = pd.read_csv('/content/drive/MyDrive/datasets/behavioral-engagement-signals/students.csv')
+df_attendance  = pd.read_csv('/content/drive/MyDrive/datasets/behavioral-engagement-signals/attendance.csv')
+df_homework    = pd.read_csv('/content/drive/MyDrive/datasets/behavioral-engagement-signals/homework.csv')
+df_performance = pd.read_csv('/content/drive/MyDrive/datasets/behavioral-engagement-signals/performance.csv')
 
 print("=== Raw file shapes ===")
 print(f"students:    {df_students.shape}")
@@ -279,20 +284,29 @@ print(f"performance: {df_performance.shape}")
 # CELL 7 — Aggregate the 5-file dataset
 # Roll everything up to one row per Student_ID
 # ─────────────────────────────────────────────
+import pandas as pd
 
 # --- Attendance: calculate attendance rate per student ---
-df_att_agg = df_attendance.groupby('Student_ID').apply(
-    lambda x: (x['Attendance_Status'].str.lower() == 'present').sum() / len(x)
+# Selecting the column before apply avoids the DeprecationWarning
+df_att_agg = df_attendance.groupby('Student_ID')['Attendance_Status'].apply(
+    lambda x: (x.str.lower() == 'present').mean()
 ).reset_index()
 df_att_agg.columns = ['Student_ID', 'attendance_rate']
 
 # --- Homework: calculate completion rate and average grade ---
+# Ensure numeric conversion to handle non-numeric characters
+df_homework['Grade_Feedback'] = pd.to_numeric(df_homework['Grade_Feedback'], errors='coerce')
+
 df_hw_agg = df_homework.groupby('Student_ID').agg(
     assignment_completion=('Status', lambda x: (x.str.lower() == 'submitted').mean()),
-    avg_hw_grade=('Grade_Feedback', lambda x: pd.to_numeric(x, errors='coerce').mean())
+    avg_hw_grade=('Grade_Feedback', 'mean')
 ).reset_index()
 
 # --- Performance: average exam score and homework completion across subjects ---
+# Convert columns to numeric; errors='coerce' handles values like '90-5' by turning them into NaN
+df_performance['Exam_Score'] = pd.to_numeric(df_performance['Exam_Score'], errors='coerce')
+df_performance['Homework_Completion_%'] = pd.to_numeric(df_performance['Homework_Completion_%'], errors='coerce')
+
 df_perf_agg = df_performance.groupby('Student_ID').agg(
     avg_grade_s1=('Exam_Score', 'mean'),
     hw_completion_pct=('Homework_Completion_%', 'mean')
@@ -441,6 +455,7 @@ os.makedirs('/content/drive/MyDrive/husai', exist_ok=True)
 df_final.to_csv('/content/drive/MyDrive/husai/husai_merged_dataset.csv', index=False)
 print("Saved to Google Drive: husai_merged_dataset.csv")
 print("\nStep 3 complete. Proceed to Step 4 (SMOTE + Model Training).")
+```
 
 ---
 
