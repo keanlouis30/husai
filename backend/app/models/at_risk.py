@@ -5,8 +5,63 @@ import os
 import pickle
 from pathlib import Path
 
-# Path where we'll save the trained model
-MODEL_PATH = Path("app/models/at_risk_model.pkl")
+# Resolve model path relative to the repo root (Models/Model-1/at_risk_model.pkl)
+# This file lives at: backend/app/models/at_risk.py
+# The .pkl lives at:  Models/Model-1/at_risk_model.pkl  (two levels above `backend/`)
+_THIS_DIR = Path(__file__).resolve().parent          # .../backend/app/models
+_REPO_ROOT = _THIS_DIR.parent.parent.parent          # .../husai (repo root)
+MODEL_PATH = _REPO_ROOT / "Models" / "Model-1" / "at_risk_model.pkl"
+_FEATURE_NAMES_PATH = _REPO_ROOT / "Models" / "Model-1" / "feature_names.json"
+
+# Model-1 expected features (from feature_names.json):
+# ["avg_grade_s1", "attendance_rate", "assignment_completion", "class_participation", "gender"]
+
+def predict_risk_model1(inputs: dict) -> dict:
+    """
+    Predict at-risk status using the actual Model-1 LightGBM .pkl file.
+
+    Args:
+        inputs: dict with keys matching Model-1 feature names:
+            - avg_grade_s1       (float, 60-100)
+            - attendance_rate    (float, 0-100)
+            - assignment_completion (float, 0-100)
+            - class_participation  (float, 0-100)
+            - gender             (int, 0=Female, 1=Male)
+
+    Returns:
+        dict with risk_level, risk_score, model_type, and used features.
+    """
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Model-1 not found at {MODEL_PATH}. "
+            "Please ensure at_risk_model.pkl is in Models/Model-1/."
+        )
+
+    with open(MODEL_PATH, "rb") as f:
+        model = pickle.load(f)
+
+    # Build feature vector in the exact order Model-1 was trained on
+    feature_order = ["avg_grade_s1", "attendance_rate", "assignment_completion",
+                     "class_participation", "gender"]
+    X = np.array([[inputs[feat] for feat in feature_order]])
+
+    risk_score = float(model.predict_proba(X)[0][1])
+
+    if risk_score >= 0.7:
+        risk_level = "high"
+    elif risk_score >= 0.4:
+        risk_level = "medium"
+    elif risk_score >= 0.2:
+        risk_level = "low"
+    else:
+        risk_level = "none"
+
+    return {
+        "risk_level":  risk_level,
+        "risk_score":  round(risk_score, 4),
+        "model_type":  "lightgbm",
+        "features_used": feature_order,
+    }
 
 def predict_risk(student: dict, grades: list, attendance: dict) -> dict:
     """

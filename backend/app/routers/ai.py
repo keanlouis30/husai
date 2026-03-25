@@ -2,15 +2,54 @@
 
 import os
 import json
+import random
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 import anthropic
 from app.db.supabase import get_db
+from app.models.at_risk import predict_risk, predict_risk_model1
 
 router = APIRouter()
 claude = anthropic.Anthropic()
+
+
+# ── MODEL-1: SYNTHETIC PREDICT ────────────────────────────────────────────────
+@router.get("/ai/model1/predict_synthetic")
+def model1_predict_synthetic():
+    """
+    Run Model-1 (at_risk_model.pkl) against a randomly generated synthetic
+    student profile. No real student data is touched.
+
+    Used by: Teacher / Admin dashboards — MVP demo of the at-risk ML pipeline.
+    """
+    # ── Build a random synthetic student profile ──────────────────────────────
+    synthetic_inputs = {
+        "avg_grade_s1":           round(random.uniform(65, 98), 1),
+        "attendance_rate":        round(random.uniform(60, 100), 1),
+        "assignment_completion":  round(random.uniform(50, 100), 1),
+        "class_participation":    round(random.uniform(40, 100), 1),
+        "gender":                 random.randint(0, 1),   # 0 = Female, 1 = Male
+    }
+
+    # ── Run the real LightGBM model ───────────────────────────────────────────
+    try:
+        prediction = predict_risk_model1(synthetic_inputs)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Model-1 inference error: {str(e)}")
+
+    return {
+        "note":             "Synthetic student data — for MVP demo only",
+        "synthetic_inputs": {
+            **synthetic_inputs,
+            "gender_label": "Male" if synthetic_inputs["gender"] == 1 else "Female",
+        },
+        "prediction":       prediction,
+        "generated_at":     datetime.utcnow().isoformat(),
+    }
 
 
 # ── SCHEMAS ───────────────────────────────────────────────────────────────────

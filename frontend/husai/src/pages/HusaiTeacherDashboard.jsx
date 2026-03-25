@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+
 // ── HUSAI TOKENS: White + Blue (Teacher Role) ─────────────────────────────────
 const T = {
   blue: "#0038A8",
@@ -671,6 +672,168 @@ const StudentRow = ({ stu, onSelect, selected }) => {
   );
 };
 
+// ── MODEL-1 RISK PANEL ───────────────────────────────────────────────────────
+const Model1RiskPanel = () => {
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const run = async () => {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await fetch("http://localhost:8000/api/ai/model1/predict_synthetic");
+      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      setResult(await res.json());
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const riskColor = {
+    high:   { bg: T.redSoft,   text: T.red,   border: T.redBorder   },
+    medium: { bg: T.amberSoft, text: T.amber,  border: T.amberBorder },
+    low:    { bg: "#FFFBEB",   text: "#92400E", border: "#FDE68A"   },
+    none:   { bg: T.greenSoft, text: T.green,  border: T.greenBorder },
+  };
+
+  const rc = result ? (riskColor[result.prediction.risk_level] || riskColor.none) : null;
+
+  return (
+    <div
+      style={{
+        background: "#F8FAFF",
+        border: `1.5px solid ${T.blueBorder}`,
+        borderRadius: 12,
+        padding: "14px 16px",
+        marginBottom: 14,
+      }}
+    >
+      {/* Header row */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color: T.blue }}>
+            🤖 Model-1 — At-Risk Analysis
+          </div>
+          <div style={{ fontSize: 10, color: T.textSoft, marginTop: 2 }}>
+            LightGBM · Synthetic Data Demo
+          </div>
+        </div>
+        <button
+          id="model1-run-btn"
+          onClick={run}
+          disabled={loading}
+          style={{
+            background: loading ? T.blueSoft : T.blue,
+            color: loading ? T.blue : "white",
+            border: "none",
+            borderRadius: 8,
+            padding: "7px 14px",
+            fontSize: 11,
+            fontWeight: 700,
+            cursor: loading ? "not-allowed" : "pointer",
+            fontFamily: "inherit",
+            transition: "background .15s",
+          }}
+        >
+          {loading ? "Running…" : result ? "Re-run" : "Run Model"}
+        </button>
+      </div>
+
+      {/* Error state */}
+      {error && (
+        <div style={{ fontSize: 11, color: T.red, background: T.redSoft, borderRadius: 8, padding: "8px 10px" }}>
+          ⚠ {error}
+        </div>
+      )}
+
+      {/* Results */}
+      {result && (
+        <div>
+          {/* Risk level badge + score bar */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                padding: "4px 10px",
+                borderRadius: 20,
+                background: rc.bg,
+                color: rc.text,
+                border: `1px solid ${rc.border}`,
+                textTransform: "capitalize",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {result.prediction.risk_level === "none" ? "On Track" : `${result.prediction.risk_level} risk`}
+            </span>
+            <div style={{ flex: 1 }}>
+              <div style={{ height: 8, background: "#EBEBEE", borderRadius: 4, overflow: "hidden" }}>
+                <div
+                  style={{
+                    width: `${Math.round(result.prediction.risk_score * 100)}%`,
+                    height: "100%",
+                    background: rc.text,
+                    borderRadius: 4,
+                    transition: "width .5s ease",
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 10, color: T.textSoft, marginTop: 3, textAlign: "right" }}>
+                Risk probability: {Math.round(result.prediction.risk_score * 100)}%
+              </div>
+            </div>
+          </div>
+
+          {/* Synthetic inputs grid */}
+          <div style={{ fontSize: 10, fontWeight: 600, color: T.textSoft, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 5 }}>
+            Synthetic Inputs Used
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {[
+              ["Avg Grade S1", result.synthetic_inputs.avg_grade_s1],
+              ["Attendance", `${result.synthetic_inputs.attendance_rate}%`],
+              ["Assignments", `${result.synthetic_inputs.assignment_completion}%`],
+              ["Participation", `${result.synthetic_inputs.class_participation}%`],
+              ["Gender", result.synthetic_inputs.gender_label],
+            ].map(([k, v]) => (
+              <span
+                key={k}
+                style={{
+                  fontSize: 10,
+                  padding: "3px 8px",
+                  borderRadius: 6,
+                  background: T.blueSoft,
+                  color: T.blue,
+                  border: `1px solid ${T.blueBorder}`,
+                  fontWeight: 600,
+                }}
+              >
+                {k}: <strong>{v}</strong>
+              </span>
+            ))}
+          </div>
+
+          <div style={{ fontSize: 10, color: T.textSoft, marginTop: 8 }}>
+            Model: <strong>{result.prediction.model_type}</strong> · Generated {new Date(result.generated_at + "Z").toLocaleTimeString()}
+          </div>
+        </div>
+      )}
+
+      {/* Idle state */}
+      {!result && !loading && !error && (
+        <div style={{ fontSize: 11, color: T.textSoft }}>
+          Click <strong>Run Model</strong> to generate a synthetic risk prediction using the trained LightGBM model.
+        </div>
+      )}
+    </div>
+  );
+};
+
+
 // Student detail drawer
 const StudentDrawer = ({ stu, onClose, onSaveObs }) => {
   const [obs, setObs] = useState(stu.obs);
@@ -937,6 +1100,9 @@ const StudentDrawer = ({ stu, onClose, onSaveObs }) => {
           </div>
         </div>
       )}
+
+      {/* Model-1 At-Risk ML Panel */}
+      <Model1RiskPanel />
 
       {/* Observation */}
       <div>
